@@ -1,0 +1,242 @@
+#include {{ domain.domain | format_include }}
+
+#include "td/utils/misc.h"
+#include "td/utils/format.h"
+
+{% for namespace in namespaces %}
+namespace {{namespace}} {
+{% endfor %}
+
+namespace detail {
+
+// --- Enum Parser ---
+
+{% for type in domain.enum_types %}
+template<>
+struct DevtoolsParser<{{ type.qualified_name }}> {
+  static td::Result<{{ type.qualified_name }}> parse(const td::JsonValue &value) {
+    if(value.type()!= td::JsonValueType::String) {
+      return td::Status::Error(400, "Parse Enum failed");
+    }
+    auto str = value.get_string();
+    auto hash = Hash64_CT(str.data(), str.size());
+    switch(hash) {
+    {% for enum in type.enums %}
+      {% set enum_value = dash_to_camelcase(enum) %}
+      case Hash64_CT("{{ enum }}"):
+        return {{type.qualified_name + "::" + enum_value}};
+    {% endfor %}
+      default:
+        return td::Status::Error(400, "Unreachable");
+    }
+  }
+};
+
+{#template<>#}
+{#struct DevtoolsValueClone<{{ type.qualified_name }}> {#}
+{#  static {{ type.qualified_name }} clone(const {{ type.qualified_name }} &base) {#}
+{#    return base;#}
+{#  }#}
+{#};#}
+
+template<>
+struct DevtoolsValueToJson<{{ type.qualified_name }}> {
+  static td::Slice to_json(const {{ type.qualified_name }} &base) {
+    switch(base) {
+  {% for enum in type.enums %}
+    {% set enum_value = dash_to_camelcase(enum) %}
+      case {{ type.qualified_name }}::{{ enum_value }}:
+        return "{{ enum }}";
+  {% endfor %}
+      default:
+        UNREACHABLE();
+    }
+  }
+};
+{% endfor %}
+
+}
+
+namespace {{domain.domain}} {
+
+// --- Type parse/clone/store ---
+
+{% for type in domain.object_types %}
+td::Result<{{ type.name }}> {{ type.name }}::parse(const td::JsonValue &value) {
+  if(value.type() != td::JsonValueType::Object) {
+    return td::Status::Error(400, "Parse {{ type.name }} failed: value is not object");
+  }
+  auto &object = value.get_object();
+  {{ type.name }} result;
+  object.foreach([&result](td::Slice name, const td::JsonValue &v) {
+    auto hash = detail::Hash64_CT(name.data(), name.size());
+    switch(hash) {
+  {% for property in type.properties %}
+      case detail::Hash64_CT("{{ property.name }}"): {
+        TRY_STATUS(parse_devtools_value(result.{{ property.name | to_snake_case }}_, v));
+        break;
+      }
+  {% endfor %}
+      default:
+        return td::Status::Error(400, PSLICE() << "Unknown " << td::tag("key", td::Slice(name.data(), name.size()))
+                                               << " for " << td::tag("Type", "{{type.name}}"));
+    }
+
+    return td::Status::OK();
+  });
+  return result;
+}
+
+{{ type.name }} {{ type.name }}::clone() const {
+  {{ type.name }} result;
+  {% for property in type.properties %}
+    {% set property_snakecase_name = property.name | to_snake_case %}
+    {% if property.optional %}
+  if({{ property_snakecase_name }}_) {
+    clone_devtools_value(result.{{ property_snakecase_name }}_, {{ property_snakecase_name }}_);
+  }
+    {% else %}
+  clone_devtools_value(result.{{ property_snakecase_name }}_, {{ property_snakecase_name }}_);
+    {% endif %}
+  {% endfor %}
+  return result;
+}
+
+void {{ type.name }}::store(td::JsonValueScope *scope) const {
+  td::to_json(*scope, td::json_object([&](auto &o) {
+  {% for property in type.properties %}
+    if({{ property.name | to_snake_case }}_) {
+      o("{{ property.name }}", devtools_value_to_json({{ property.name | to_snake_case }}_));
+    }
+  {% endfor %}
+  }));
+}
+{% endfor %}
+
+// --- Event parse/clone/store ---
+
+{% for event in domain.event_types %}
+  {% set event_camelcase_name = event.name | dash_to_camelcase %}
+td::Result<Ptr<DevtoolsEvent>> {{ event.name | dash_to_camelcase }}::parse(const td::JsonValue &value) {
+  if(value.type() != td::JsonValueType::Object) {
+    return td::Status::Error(400, "Parse {{ event.name | dash_to_camelcase }} failed: value is not object");
+  }
+  auto &object = value.get_object();
+  auto result = td::make_unique<{{ event_camelcase_name }}>();
+  object.foreach([&result](td::Slice name, const td::JsonValue &v) {
+    auto hash = detail::Hash64_CT(name.data(), name.size());
+    switch(hash) {
+  {% for attribute in event.attributes %}
+      case detail::Hash64_CT("{{ attribute.name }}"): {
+        TRY_STATUS(parse_devtools_value(result->{{ attribute.name | to_snake_case }}_, v));
+        break;
+      }
+  {% endfor %}
+      default:
+        return td::Status::Error(400, PSLICE() << "Unknown "<< td::tag("key", td::Slice(name.data(), name.size()))
+                                               << " for " << td::tag("Event", "{{ event.name }}"));
+    }
+
+    return td::Status::OK();
+  });
+  return result;
+}
+
+Ptr<DevtoolsEvent> {{ event.name | dash_to_camelcase }}::clone() const {
+  auto result = td::make_unique<{{ event.name | dash_to_camelcase }}>();
+  {% for attribute in event.attributes %}
+    if({{ attribute.name | to_snake_case }}_) {
+      clone_devtools_value(result->{{ attribute.name | to_snake_case }}_, {{ attribute.name | to_snake_case }}_);
+    }
+  {% endfor %}
+  return result;
+}
+
+void {{ event_camelcase_name }}::store(td::JsonValueScope *scope) const {
+  td::to_json(*scope, td::json_object([&](auto &o) {
+  {% for attribute in event.attributes %}
+    {% set attribute_snake_case_name = attribute.name | to_snake_case %}
+    if({{ attribute_snake_case_name }}_) {
+      o("{{ attribute.name }}", devtools_value_to_json({{ attribute_snake_case_name }}_));
+    }
+  {% endfor %}
+  }));
+}
+
+{% endfor %}
+
+// --- Command store / Response parse / clone ---
+
+{% for command in domain.command_types %}
+  {% set command_camelacase_name = command.name | dash_to_camelcase %}
+void {{ command_camelacase_name }}::store(td::JsonValueScope *scope) const {
+  td::to_json(*scope, td::json_object([&](auto &o) {
+  {% for param in command.params %}
+    {% set param_snake_case_name = param.name | to_snake_case %}
+    if({{ param_snake_case_name }}_) {
+      o("{{ param.name }}", devtools_value_to_json({{ param_snake_case_name }}_));
+    }
+  {% endfor %}
+  }));
+}
+
+td::Promise<td::JsonValue> {{ command_camelacase_name }}::make_promise(td::Promise<Response> promise) {
+  return [promise = std::move(promise)](auto result) mutable {
+    TRY_RESULT_PROMISE(promise, response_json, std::move(result));
+    promise.set_result(Response::parse(response_json));
+  };
+}
+
+td::Result<{{ command_camelacase_name }}::Response> {{ command_camelacase_name }}::Response::parse(const td::JsonValue &value) {
+  if(value.type() != td::JsonValueType::Object) {
+    return td::Status::Error(400, "Parse {{ command.name | dash_to_camelcase }}::Response failed: value is not object");
+  }
+  auto &object = value.get_object();
+  {{ command.name | dash_to_camelcase }}::Response result;
+  object.foreach([&result](td::Slice name, const td::JsonValue &v) {
+    auto hash = detail::Hash64_CT(name.data(), name.size());
+    switch(hash) {
+  {% for response in command.response %}
+      case detail::Hash64_CT("{{ response.name }}"): {
+        TRY_STATUS(parse_devtools_value(result.{{ response.name | to_snake_case }}_, v));
+        break;
+      }
+  {% endfor %}
+      default:
+        return td::Status::Error(400, PSLICE() << "Unknown "<< td::tag("key", td::Slice(name.data(), name.size()))
+                                               << " for " << td::tag("Response", "{{ command.name | dash_to_camelcase }}"));
+    }
+
+    return td::Status::OK();
+  });
+  return result;
+}
+
+{#Ptr<{{ command.name | dash_to_camelcase }}::Response> {{ command.name | dash_to_camelcase }}::Response::clone() const {#}
+{#  auto result = td::make_unique<Response>();#}
+{#  {% for response in command.response %}#}
+{#    if({{ response.name | to_snake_case }}_) {#}
+{#      clone_devtools_value(result->{{ response.name | to_snake_case }}_, {{ response.name | to_snake_case }}_);#}
+{#    }#}
+{#  {% endfor %}#}
+{#  return result;#}
+{#}#}
+
+void {{ command.name | dash_to_camelcase }}::Response::store(td::JsonValueScope *scope) const {
+  td::to_json(*scope, td::json_object([&](auto &o) {
+  {% for response in command.response %}
+    {% set response_snake_case_name = response.name | to_snake_case %}
+    if({{ response_snake_case_name }}_) {
+      o("{{ response.name }}", devtools_value_to_json({{ response_snake_case_name }}_));
+    }
+  {% endfor %}
+  }));
+}
+
+{% endfor %}
+
+}
+
+{% for namespace in namespaces %}
+}
+{% endfor %}

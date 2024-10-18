@@ -1,0 +1,174 @@
+#pragma once
+
+#include {{ "Devtools" | format_include }}
+
+{% for name in domain.dependencies %}
+#include {{name | format_include}}
+{% endfor %}
+
+#include "td/utils/Promise.h"
+
+{% for namespace in namespaces %}
+namespace {{namespace}} {
+{% endfor %}
+
+namespace {{domain.domain}} {
+
+// --- Pre Definition ---
+{% for type in domain.object_types %}
+class {{ type.name }};
+{% endfor %}
+
+// --- Using ---
+{% for type in domain.using_types %}
+using {{ type.name }} = {{ type.type.qualified_name }};
+{% endfor %}
+
+// --- Enum Types ---
+{% for type in domain.enum_types %}
+  {% if not type.is_type %}
+    {% continue %}
+  {% endif %}
+enum class {{ type.name }} {
+  {% for enum in type.enums %}
+  {{ enum | dash_to_camelcase }},
+  {% endfor %}
+};
+
+{% endfor %}
+
+// --- Object Type Definition ---
+{% for type in domain.object_types %}
+  {% if type.description != "" %}
+/**
+    {% for d in type.description.split('\n') %}
+  * {{ d }}
+    {% endfor %}
+  */
+  {% endif %}
+class {{ type.name }} : public DevtoolsValue {
+ public:
+  {% for property in type.properties %}
+    {% set property_type = property.type %}
+    {% if property.is_enum %}
+  enum class {{ property_type.name }} {
+      {% for enum in property_type.enums %}
+    {{ enum | dash_to_camelcase }},
+      {% endfor %}
+  };
+    {% endif %}
+    {% set type_name = property_type.name if property.domain == property_type.domain else property_type.qualified_name %}
+    {% set type_name = to_array_type(type_name) if property.is_array else type_name %}
+    {% set type_name = wrap_ptr(type_name) %}
+    {% if property.description != "" %}
+      {% for d in property.description.split('\n') %}
+  /// {{ d }}
+      {% endfor %}
+    {% endif %}
+  {%+ if not property.optional %}/* R */{% else %}       {% endif %}{{ type_name }} {{ property.name | to_snake_case }}_;
+  {% endfor %}
+
+  static td::Result<{{ type.name }}> parse(const td::JsonValue &value);
+  {{ type.name }} clone() const;
+  void store(td::JsonValueScope *scope) const;
+};
+
+{% endfor %}
+
+// --- Event Type Definition ---
+
+{% for event in domain.event_types %}
+  {% set qualified_event_name = domain.domain + '.' + event.name %}
+  {% if event.description != "" %}
+/**
+    {% for d in event.description.split('\n') %}
+  * {{ d }}
+    {% endfor %}
+  */
+  {% endif %}
+class {{ event.name | dash_to_camelcase }} : public DevtoolsEvent {
+ public:
+  static constexpr const char NAME[] = "{{ qualified_event_name }}";
+  static constexpr const td::uint64 ID = detail::Hash64_CT("{{ qualified_event_name }}");
+
+  {% for attribute in event.attributes %}
+    {% set attribute_type = attribute.type %}
+    {% set type_name = attribute_type.name if attribute.domain == attribute_type.domain else attribute_type.qualified_name %}
+    {% set type_name = to_array_type(type_name) if attribute.is_array else type_name %}
+    {% set type_name = wrap_ptr(type_name) %}
+    {% if attribute.description != "" %}
+      {% for d in attribute.description.split('\n') %}
+  /// {{ d }}
+      {% endfor %}
+    {% endif %}
+  {{ type_name }} {{ attribute.name | to_snake_case }}_;
+  {% endfor %}
+
+  static td::Result<Ptr<DevtoolsEvent>> parse(const td::JsonValue &value);
+
+  td::Slice name() const final { return NAME; }
+  td::uint64 id() const final { return ID; }
+  Ptr<DevtoolsEvent> clone() const final;
+  void store(td::JsonValueScope *scope) const final;
+};
+
+{% endfor %}
+
+// --- Command Type Definition ---
+
+{% for command in domain.command_types %}
+  {% if command.description != "" %}
+/**
+    {% for d in command.description.split('\n') %}
+  * {{ d }}
+    {% endfor %}
+  */
+  {% endif %}
+class {{ command.name | dash_to_camelcase }} : public DevtoolsCommand {
+ public:
+  class Response : td::Jsonable {
+   public:
+  {% for response in command.response %}
+    {% set response_type = response.type %}
+    {% set type_name = response_type.name if response.domain == response_type.domain else response_type.qualified_name %}
+    {% set type_name = to_array_type(type_name) if response.is_array else type_name %}
+    {% set type_name = wrap_ptr(type_name) %}
+    {% if response.description != "" %}
+      {% for d in response.description.split('\n') %}
+    /// {{ d }}
+      {% endfor %}
+    {% endif %}
+    {{ type_name }} {{ response.name | to_snake_case }}_;
+  {% endfor %}
+
+    static td::Result<Response> parse(const td::JsonValue &value);
+    Response clone() const;
+    void store(td::JsonValueScope *scope) const;
+  };
+
+  static constexpr const char METHOD_NAME[] = "{{ domain.domain + "." + command.name }}";
+
+  {% for param in command.params %}
+    {% set param_type = param.type %}
+    {% set type_name = param_type.name if param.domain == param_type.domain else param_type.qualified_name %}
+    {% set type_name = to_array_type(type_name) if param.is_array else type_name %}
+    {% set type_name = wrap_ptr(type_name) %}
+    {% if param.description != "" %}
+      {% for d in param.description.split('\n') %}
+  /// {{ d }}
+      {% endfor %}
+    {% endif %}
+  {%+ if not param.optional %}/* R */{% else %}       {% endif %}{{ type_name }} {{ param.name | to_snake_case }}_;
+  {% endfor %}
+
+  td::Slice method() const final { return METHOD_NAME; }
+  static td::Promise<td::JsonValue> make_promise(td::Promise<Response> promise);
+  void store(td::JsonValueScope *scope) const override;
+};
+
+{% endfor %}
+
+}
+{% for namespace in namespaces %}
+}
+{% endfor -%}

@@ -1,0 +1,52 @@
+#include "td/utils/SliceBuilder.h"
+
+#include <map>
+
+#include {{ "Devtools.h" | format_include }}
+{% for domain in domains.keys() %}
+#include {{ domain | format_include }}
+{% endfor %}
+
+{% for namespace in namespaces %}
+namespace {{ namespace }} {
+{% endfor %}
+
+const std::map<td::uint32, td::Result<Ptr<DevtoolsEvent>>(*)(const td::JsonValue &)> EVENT_PARSER = {
+{% for domain_name, domain in domains.items() %}
+  {% for event in domain.event_types %}
+    {% set event_name = domain_name + '.' + event.name %}
+    {% set qualified_name = domain_name + "::" + dash_to_camelcase(event.name) %}
+  { detail::Hash64_CT("{{ event_name }}"), &{{ qualified_name }}::parse },
+  {% endfor %}
+{% endfor %}
+};
+
+td::Result<Ptr<DevtoolsEvent>> parse_devtools_event(td::JsonValue &value) {
+  if (value.type() != td::JsonValueType::Object) {
+    return td::Status::Error(400, "Parse event failed: value is not Object");
+  }
+  auto &object_value = value.get_object();
+
+  TRY_RESULT(method, object_value.get_required_string_field("method"));
+  auto method_hash = detail::Hash64_CT(method.data(), method.size());
+  auto parse_func_ite = EVENT_PARSER.find(method_hash);
+  if (parse_func_ite == EVENT_PARSER.end()) {
+    return td::Status::Error(400, PSLICE() << "Parse event failed: no parser for "
+                                           << td::Slice(method.data(), method.size()));
+  }
+
+  TRY_RESULT(params, object_value.extract_required_field("params", td::JsonValueType::Object));
+
+  auto parse_func = parse_func_ite->second;
+  TRY_RESULT(event, parse_func(params));
+
+  auto session = object_value.extract_field("sessionId");
+  if(session.type() == td::JsonValueType::String) {
+     event->session_ = session.get_string().str();
+  }
+  return event;
+}
+
+{% for namespace in namespaces %}
+}
+{% endfor %}
